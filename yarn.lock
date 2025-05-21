@@ -201,23 +201,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@fastnear/api@workspace:*, @fastnear/api@workspace:packages/api":
-  version: 0.0.0-use.local
-  resolution: "@fastnear/api@workspace:packages/api"
-  dependencies:
-    "@fastnear/utils": "workspace:*"
-    "@fastnear/wallet-adapter": "workspace:*"
-    "@noble/curves": "npm:*"
-    "@noble/hashes": "npm:*"
-    base58-js: "npm:*"
-    big.js: "npm:*"
-    borsh: "npm:*"
-    rimraf: "npm:*"
-    tsup: "npm:*"
-    typescript: "npm:*"
-  languageName: unknown
-  linkType: soft
-
 "@fastnear/borsh-schema@workspace:*, @fastnear/borsh-schema@workspace:packages/borsh-schema":
   version: 0.0.0-use.local
   resolution: "@fastnear/borsh-schema@workspace:packages/borsh-schema"
@@ -246,14 +229,14 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@fastnear/repl@workspace:packages/repl"
   dependencies:
-    "@fastnear/api": "workspace:*"
+    fastintear: "workspace:*"
     rimraf: "npm:*"
   bin:
     repl: bin/repl.cjs
   languageName: unknown
   linkType: soft
 
-"@fastnear/utils@workspace:*, @fastnear/utils@workspace:packages/utils":
+"@fastnear/utils@npm:^0.9.7, @fastnear/utils@workspace:*, @fastnear/utils@workspace:packages/utils":
   version: 0.0.0-use.local
   resolution: "@fastnear/utils@workspace:packages/utils"
   dependencies:
@@ -297,7 +280,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@fastnear/wallet-adapter@workspace:*, @fastnear/wallet-adapter@workspace:packages/wallet-adapter":
+"@fastnear/wallet-adapter@workspace:packages/wallet-adapter":
   version: 0.0.0-use.local
   resolution: "@fastnear/wallet-adapter@workspace:packages/wallet-adapter"
   dependencies:
@@ -1646,6 +1629,22 @@ __metadata:
   checksum: 10c0/74a513c2af0584448aee71ce56005185f81239eab7a2343110e5bad50c39ad4fb19c5a6f99783ead1cac7ccaf3461a6034fda89fffa2b30b6d99b9f21c2f9d29
   languageName: node
   linkType: hard
+
+"fastintear@workspace:*, fastintear@workspace:packages/api":
+  version: 0.0.0-use.local
+  resolution: "fastintear@workspace:packages/api"
+  dependencies:
+    "@fastnear/utils": "npm:^0.9.7"
+    "@noble/curves": "npm:*"
+    "@noble/hashes": "npm:*"
+    base58-js: "npm:*"
+    big.js: "npm:*"
+    borsh: "npm:*"
+    rimraf: "npm:*"
+    tsup: "npm:*"
+    typescript: "npm:*"
+  languageName: unknown
+  linkType: soft
 
 "fastnear-js-monorepo@workspace:.":
   version: 0.0.0-use.local

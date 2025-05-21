@@ -1,39 +1,41 @@
-import Big from "big.js";
 import {
-  lsSet,
-  lsGet,
-  tryParseJson,
-  fromBase64,
-  toBase64,
+  bytesToBase64,
   canSignWithLAK,
-  toBase58,
+  fromBase64,
+  lsGet,
+  lsSet,
   parseJsonFromBytes,
-  signHash,
-  publicKeyFromPrivate,
+  PlainTransaction,
   privateKeyFromRandom,
+  serializeSignedTransaction,
   serializeTransaction,
-  serializeSignedTransaction, bytesToBase64, PlainTransaction,
+  signHash,
+  toBase58,
+  toBase64,
+  tryParseJson
 } from "@fastnear/utils";
+import Big from "big.js";
 
 import {
   _adapter,
   _state,
   DEFAULT_NETWORK_ID,
-  NETWORKS,
   getTxHistory,
+  NETWORKS,
   update,
   updateTxHistory,
 } from "./state.js";
 
 import {
   getConfig,
-  setConfig,
   resetTxHistory,
+  setConfig,
 } from "./state.js";
 
-import { sha256 } from "@noble/hashes/sha2";
 import * as reExportAllUtils from "@fastnear/utils";
+import { sha256 } from "@noble/hashes/sha2";
 import * as stateExports from "./state.js";
+import { type EventsType } from "./state.js";
 
 Big.DP = 27;
 export const MaxBlockDelayMs = 1000 * 60 * 60 * 6; // 6 hours
@@ -106,7 +108,7 @@ export function afterTxSent(txId: string) {
     sender_account_id: txHistory[txId]?.tx?.signerId,
     wait_until: "EXECUTED_OPTIMISTIC",
   })
-    .then( result => {
+    .then(result => {
       const successValue = result?.result?.status?.SuccessValue;
       updateTxHistory({
         txId,
@@ -255,18 +257,18 @@ export const requestSignIn = async ({ contractId }: { contractId: string }) => {
     update({ accountId: result.accountId, privateKey: null, publicKey: null, accessKeyContractId: contractId });
   } else {
     // This case might indicate an issue if signIn resolves without accountId or error
-     console.warn("@fastnear: signIn resolved without accountId or error.");
-     update({ accountId: null, privateKey: null, publicKey: null, accessKeyContractId: null }); // Ensure signed out state
+    console.warn("@fastnear: signIn resolved without accountId or error.");
+    update({ accountId: null, privateKey: null, publicKey: null, accessKeyContractId: null }); // Ensure signed out state
   }
 };
 
 export const view = async ({
-                             contractId,
-                             methodName,
-                             args,
-                             argsBase64,
-                             blockId,
-                           }: {
+  contractId,
+  methodName,
+  args,
+  argsBase64,
+  blockId,
+}: {
   contractId: string;
   methodName: string;
   args?: any;
@@ -291,9 +293,9 @@ export const view = async ({
 };
 
 export const queryAccount = async ({
-                                accountId,
-                                blockId,
-                              }: {
+  accountId,
+  blockId,
+}: {
   accountId: string;
   blockId?: string;
 }) => {
@@ -308,10 +310,10 @@ export const queryBlock = async ({ blockId }: { blockId?: string }): Promise<Blo
 };
 
 export const queryAccessKey = async ({
-                                  accountId,
-                                  publicKey,
-                                  blockId,
-                                }: {
+  accountId,
+  publicKey,
+  blockId,
+}: {
   accountId: string;
   publicKey: string;
   blockId?: string;
@@ -372,13 +374,13 @@ export const signMessage = async ({
 }): Promise<SignatureResult> => {
   const signerId = _state.accountId;
   if (!signerId) throw new Error("Must sign in");
-  
+
   // Generate a random nonce if not provided
   // could use near-sign-verify
   const messageNonce = nonce || crypto.getRandomValues(new Uint8Array(32));
-  
+
   try {
-    
+
     const result = await _adapter.signMessage({
       message,
       recipient,
@@ -387,7 +389,7 @@ export const signMessage = async ({
       callbackUrl,
       state,
     });
-    
+
     return {
       accountId: result.accountId,
       publicKey: result.publicKey,
@@ -400,10 +402,10 @@ export const signMessage = async ({
 };
 
 export const sendTx = async ({
-                               receiverId,
-                               actions,
-                               waitUntil,
-                             }: {
+  receiverId,
+  actions,
+  waitUntil,
+}: {
   receiverId: string;
   actions: any[];
   waitUntil?: string;
@@ -565,7 +567,7 @@ for (const key in stateExports) {
 
 // devx
 
-export const event = state['events'];
+export const event: EventsType = state['events'];
 delete state['events'];
 
 // Wallet redirect handling
@@ -651,12 +653,12 @@ try {
 // action helpers
 export const actions = {
   functionCall: ({
-                   methodName,
-                   gas,
-                   deposit,
-                   args,
-                   argsBase64,
-                 }: {
+    methodName,
+    gas,
+    deposit,
+    args,
+    argsBase64,
+  }: {
     methodName: string;
     gas?: string;
     deposit?: string;
@@ -676,24 +678,24 @@ export const actions = {
     deposit: yoctoAmount,
   }),
 
-  stakeNEAR: ({amount, publicKey}: { amount: string; publicKey: string }) => ({
+  stakeNEAR: ({ amount, publicKey }: { amount: string; publicKey: string }) => ({
     type: "Stake",
     stake: amount,
     publicKey,
   }),
 
-  addFullAccessKey: ({publicKey}: { publicKey: string }) => ({
+  addFullAccessKey: ({ publicKey }: { publicKey: string }) => ({
     type: "AddKey",
     publicKey: publicKey,
-    accessKey: {permission: "FullAccess"},
+    accessKey: { permission: "FullAccess" },
   }),
 
   addLimitedAccessKey: ({
-                          publicKey,
-                          allowance,
-                          accountId,
-                          methodNames,
-                        }: {
+    publicKey,
+    allowance,
+    accountId,
+    methodNames,
+  }: {
     publicKey: string;
     allowance: string;
     accountId: string;
@@ -709,12 +711,12 @@ export const actions = {
     },
   }),
 
-  deleteKey: ({publicKey}: { publicKey: string }) => ({
+  deleteKey: ({ publicKey }: { publicKey: string }) => ({
     type: "DeleteKey",
     publicKey,
   }),
 
-  deleteAccount: ({beneficiaryId}: { beneficiaryId: string }) => ({
+  deleteAccount: ({ beneficiaryId }: { beneficiaryId: string }) => ({
     type: "DeleteAccount",
     beneficiaryId,
   }),
@@ -723,7 +725,7 @@ export const actions = {
     type: "CreateAccount",
   }),
 
-  deployContract: ({codeBase64}: { codeBase64: string }) => ({
+  deployContract: ({ codeBase64 }: { codeBase64: string }) => ({
     type: "DeployContract",
     codeBase64,
   }),
