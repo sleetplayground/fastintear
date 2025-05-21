@@ -69,6 +69,8 @@ export interface EventsType {
   notifyTxListeners: (tx: TxStatus) => void;
   onAccount: (callback: (accountId: string) => void) => void;
   onTx: (callback: (tx: TxStatus) => void) => void;
+  offAccount: (callback: (accountId: string) => void) => void;
+  offTx: (callback: (tx: TxStatus) => void) => void;
 }
 
 export interface UnbroadcastedEvents {
@@ -190,6 +192,14 @@ export const events: EventsType = {
       _unbroadcastedEvents.tx = [];
       txEvent.forEach(events.notifyTxListeners);
     }
+  },
+
+  offAccount: (callback: (accountId: string) => void): void => {
+    events._eventListeners.account.delete(callback);
+  },
+
+  offTx: (callback: (tx: TxStatus) => void): void => {
+    events._eventListeners.tx.delete(callback);
   }
 }
 
