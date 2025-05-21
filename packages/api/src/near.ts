@@ -239,7 +239,8 @@ export const selected = () => {
   }
 }
 
-export const requestSignIn = async ({ contractId }: { contractId: string }) => {
+export const requestSignIn = async (args?: { contractId?: string }) => {
+  const contractId = args?.contractId;
   const privateKey = privateKeyFromRandom();
   update({ accessKeyContractId: contractId, accountId: null, privateKey });
 

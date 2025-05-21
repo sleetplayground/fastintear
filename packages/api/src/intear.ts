@@ -124,7 +124,7 @@ export class WalletAdapter {
   }
 
 
-  async signIn({ contractId, methodNames, networkId }: { contractId: string; methodNames?: string[]; networkId: string; }): Promise<{ accountId: string, accounts: LocalAccount[], error?: string }> {
+  async signIn({ contractId, methodNames, networkId }: { contractId?: string; methodNames?: string[]; networkId: string; }): Promise<{ accountId: string, accounts: LocalAccount[], error?: string }> {
     console.log("WalletAdapter: signIn", { contractId, methodNames, networkId });
     const privateKey = privateKeyFromRandom();
 
@@ -183,7 +183,7 @@ export class WalletAdapter {
             const dataToSave: SavedData = {
               accounts,
               key: privateKey,
-              contractId: functionCallKeyAdded ? contractId : "",
+              contractId: functionCallKeyAdded && contractId ? contractId : "",
               methodNames: functionCallKeyAdded ? (methodNames ?? []) : [],
               logoutKey: logoutKey,
               networkId: networkId,

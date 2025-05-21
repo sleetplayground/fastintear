@@ -67,8 +67,8 @@ export interface EventsType {
   };
   notifyAccountListeners: (accountId: string) => void;
   notifyTxListeners: (tx: TxStatus) => void;
-  onAccount: (callback: (accountId: string) => void) => void;
-  onTx: (callback: (tx: TxStatus) => void) => void;
+  onAccount: (callback: (accountId: string) => void) => (accountId: string) => void;
+  onTx: (callback: (tx: TxStatus) => void) => (tx: TxStatus) => void;
   offAccount: (callback: (accountId: string) => void) => void;
   offTx: (callback: (tx: TxStatus) => void) => void;
 }
@@ -183,15 +183,17 @@ export const events: EventsType = {
       _unbroadcastedEvents.account = [];
       accountEvent.forEach(events.notifyAccountListeners);
     }
+    return callback;
   },
 
-  onTx: (callback: (tx: TxStatus) => void): void => {
+  onTx: (callback: (tx: TxStatus) => void): (tx: TxStatus) => void => {
     events._eventListeners.tx.add(callback);
     if (_unbroadcastedEvents.tx.length > 0) {
       const txEvent = _unbroadcastedEvents.tx;
       _unbroadcastedEvents.tx = [];
       txEvent.forEach(events.notifyTxListeners);
     }
+    return callback;
   },
 
   offAccount: (callback: (accountId: string) => void): void => {
