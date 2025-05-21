@@ -1,14 +1,11 @@
 import {
-  SignatureResult,
-  WalletTxResult
-} from "fastintear";
-import {
   canSignWithLAK,
   privateKeyFromRandom,
   publicKeyFromPrivate,
   signHash
 } from "@fastnear/utils";
 import { sha256 } from "@noble/hashes/sha2";
+import { SignatureResult, WalletTxResult } from "./near";
 
 const DEFAULT_WALLET_DOMAIN = "https://wallet.intear.tech";
 const DEFAULT_LOGOUT_BRIDGE_SERVICE = "https://logout-bridge-service.intear.tech";

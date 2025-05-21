@@ -26,6 +26,103 @@ import {
   updateTxHistory,
 } from "./state.js";
 
+// action types
+export interface CreateAccountAction {
+  type: "CreateAccount";
+}
+
+export interface DeployContractAction {
+  type: "DeployContract";
+  params: {
+    code: Uint8Array;
+  };
+}
+
+export interface FunctionCallAction {
+  type: "FunctionCall";
+  params: {
+    methodName: string;
+    args: object;
+    gas: string;
+    deposit: string;
+  };
+}
+
+export interface TransferAction {
+  type: "Transfer";
+  params: {
+    deposit: string;
+  };
+}
+
+export interface StakeAction {
+  type: "Stake";
+  params: {
+    stake: string;
+    publicKey: string;
+  };
+}
+
+export type AddKeyPermission =
+  | "FullAccess"
+  | {
+    receiverId: string;
+    allowance?: string;
+    methodNames?: Array<string>;
+  };
+
+export interface AddKeyAction {
+  type: "AddKey";
+  params: {
+    publicKey: string;
+    accessKey: {
+      nonce?: number;
+      permission: AddKeyPermission;
+    };
+  };
+}
+
+export interface DeleteKeyAction {
+  type: "DeleteKey";
+  params: {
+    publicKey: string;
+  };
+}
+
+export interface DeleteAccountAction {
+  type: "DeleteAccount";
+  params: {
+    beneficiaryId: string;
+  };
+}
+
+export interface SignedDelegateAction {
+  type: "SignedDelegate";
+  params: {
+    delegateAction: Action;
+    signature: string;
+  };
+}
+
+export type Action =
+  | CreateAccountAction
+  | DeployContractAction
+  | FunctionCallAction
+  | TransferAction
+  | StakeAction
+  | AddKeyAction
+  | DeleteKeyAction
+  | DeleteAccountAction
+  | SignedDelegateAction;
+
+export type ActionType = Action["type"];
+
+export interface Transaction {
+  signerId: string;
+  receiverId: string;
+  actions: Array<Action>;
+}
+
 import {
   getConfig,
   resetTxHistory,
@@ -50,7 +147,7 @@ export interface AccessKeyWithError {
 
 export interface WalletTxResult {
   url?: string;
-  outcomes?: Array<{ transaction: { hash: string } }>;
+  outcomes?: Array<Map<string, any>>; // transaction { hash }
   rejected?: boolean;
   error?: string;
 }
@@ -408,7 +505,7 @@ export const sendTx = async ({
   waitUntil,
 }: {
   receiverId: string;
-  actions: any[];
+  actions: Action[];
   waitUntil?: string;
 }) => {
   const signerId = _state.accountId;
@@ -442,21 +539,22 @@ export const sendTx = async ({
     url.searchParams.delete("errorMessage");
 
     try {
-      const result: WalletTxResult = await _adapter.sendTransactions({
+      const result = await _adapter.sendTransactions({
         transactions: [jsonTx],
       });
 
       // Resolves with outcomes or rejection
-      if (result.outcomes?.length) {
-        result.outcomes.forEach((r) =>
-          updateTxHistory({
-            txId,
-            status: "Executed",
-            result: r,
-            txHash: r.transaction.hash,
-            finalState: true,
-          })
-        );
+    if (result.outcomes?.length) {
+      result.outcomes.forEach((r) => {
+        const transactionEntry = r.get("transaction");
+        updateTxHistory({
+          txId,
+          status: "Executed",
+          result: r,
+          txHash: transactionEntry?.hash,
+          finalState: true,
+        });
+      });
       } else if (result.rejected) {
         updateTxHistory({ txId, status: "RejectedByUser", finalState: true });
       } else if (result.error) {
@@ -525,7 +623,9 @@ export const sendTx = async ({
   const txHashBytes = sha256(txBytes);
   const txHash58 = toBase58(txHashBytes);
 
-  const signatureBase58 = signHash(txHashBytes, privKey, { returnBase58: true });
+  // signHash with returnBase58: true is expected to return a base58 string.
+  // We cast to string to satisfy TypeScript if its inferred type is still Hex.
+  const signatureBase58 = signHash(txHashBytes, privKey, { returnBase58: true }) as string;
   const signedTransactionBytes = serializeSignedTransaction(plainTransactionObj, signatureBase58);
   const signedTxBase64 = bytesToBase64(signedTransactionBytes);
 
@@ -567,7 +667,6 @@ for (const key in stateExports) {
 }
 
 // devx
-
 export const event: EventsType = state['events'];
 delete state['events'];
 
@@ -665,30 +764,56 @@ export const actions = {
     deposit?: string;
     args?: Record<string, any>;
     argsBase64?: string;
-  }) => ({
-    type: "FunctionCall",
-    methodName,
-    args,
-    argsBase64,
-    gas,
-    deposit,
-  }),
+  }): FunctionCallAction => {
+    let finalArgs: object = args || {};
+    if (!args && argsBase64) {
+      try {
+        const decoded = fromBase64(argsBase64);
+        if (typeof decoded !== 'object' || decoded === null || !(decoded as unknown instanceof Uint8Array)) {
+          throw new Error(
+            "Failed to decode base64 contract code, or the result was not a valid Uint8Array."
+          );
+        }
+        finalArgs = JSON.parse(new TextDecoder().decode(decoded));
+      } catch (e) {
+        console.error("Failed to decode or parse argsBase64:", e);
+        // Decide on fallback: throw error or use empty args
+        throw new Error("Invalid argsBase64 provided for functionCall");
+      }
+    }
 
-  transfer: (yoctoAmount: string) => ({
+    return {
+      type: "FunctionCall",
+      params: {
+        methodName,
+        args: finalArgs,
+        gas: gas || "30000000000000", // Default gas
+        deposit: deposit || "0", // Default deposit
+      },
+    };
+  },
+
+  transfer: (yoctoAmount: string): TransferAction => ({
     type: "Transfer",
-    deposit: yoctoAmount,
+    params: {
+      deposit: yoctoAmount,
+    },
   }),
 
-  stakeNEAR: ({ amount, publicKey }: { amount: string; publicKey: string }) => ({
+  stake: ({ amount, publicKey }: { amount: string; publicKey: string }): StakeAction => ({
     type: "Stake",
-    stake: amount,
-    publicKey,
+    params: {
+      stake: amount,
+      publicKey,
+    },
   }),
 
-  addFullAccessKey: ({ publicKey }: { publicKey: string }) => ({
+  addFullAccessKey: ({ publicKey }: { publicKey: string }): AddKeyAction => ({
     type: "AddKey",
-    publicKey: publicKey,
-    accessKey: { permission: "FullAccess" },
+    params: {
+      publicKey: publicKey,
+      accessKey: { permission: "FullAccess" },
+    },
   }),
 
   addLimitedAccessKey: ({
@@ -701,33 +826,51 @@ export const actions = {
     allowance: string;
     accountId: string;
     methodNames: string[];
-  }) => ({
+  }): AddKeyAction => ({
     type: "AddKey",
-    publicKey: publicKey,
-    accessKey: {
-      permission: "FunctionCall",
-      allowance,
-      receiverId: accountId,
-      methodNames,
+    params: {
+      publicKey: publicKey,
+      accessKey: {
+        permission: {
+          receiverId: accountId,
+          allowance: allowance,
+          methodNames: methodNames,
+        },
+      },
     },
   }),
 
-  deleteKey: ({ publicKey }: { publicKey: string }) => ({
+  deleteKey: ({ publicKey }: { publicKey: string }): DeleteKeyAction => ({
     type: "DeleteKey",
-    publicKey,
+    params: {
+      publicKey,
+    },
   }),
 
-  deleteAccount: ({ beneficiaryId }: { beneficiaryId: string }) => ({
+  deleteAccount: ({ beneficiaryId }: { beneficiaryId: string }): DeleteAccountAction => ({
     type: "DeleteAccount",
-    beneficiaryId,
+    params: {
+      beneficiaryId,
+    },
   }),
 
-  createAccount: () => ({
+  createAccount: (): CreateAccountAction => ({
     type: "CreateAccount",
   }),
 
-  deployContract: ({ codeBase64 }: { codeBase64: string }) => ({
-    type: "DeployContract",
-    codeBase64,
-  }),
+  deployContract: ({ codeBase64 }: { codeBase64: string }): DeployContractAction => {
+    const codeBytes = fromBase64(codeBase64);
+    // Ensure fromBase64 returned a Uint8Array, throw error if not
+    if (typeof codeBytes !== 'object' || codeBytes === null || !(codeBytes as unknown instanceof Uint8Array)) {
+      throw new Error(
+        "Failed to decode base64 contract code, or the result was not a valid Uint8Array."
+      );
+    }
+    return {
+      type: "DeployContract",
+      params: {
+        code: codeBytes,
+      },
+    };
+  },
 };
