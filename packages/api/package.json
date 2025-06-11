@@ -1,7 +1,7 @@
 {
   "name": "fastintear",
-  "version": "0.1.5",
-  "description": "Interact with NEAR Protocol blockchain including transaction signing, utilities, and more.",
+  "version": "0.1.6",
+  "description": "Interact with FAST-INT-NEAR Protocol blockchain including transaction signing, utilities, and more.",
   "type": "module",
   "types": "./dist/esm/index.d.ts",
   "main": "./dist/cjs/index.cjs",

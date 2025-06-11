@@ -349,10 +349,14 @@ export const requestSignIn = async (args?: { contractId?: string }) => {
   if (result.error) {
     throw new Error(`Wallet error: ${result.error}`);
   }
-  // If signIn succeeded, result contains accountId and accounts
+  // If signIn succeeded, update state with result 
   if (result.accountId) {
-    // Update local state ONLY with the accountId. Let intear-wallet manage keys.
-    update({ accountId: result.accountId, privateKey: null, publicKey: null, accessKeyContractId: contractId });
+    update({ 
+      accountId: result.accountId, 
+      privateKey: result.privateKey, // Return the publicKey and privateKey from intear adapter
+      publicKey: result.publicKey,   
+      accessKeyContractId: contractId 
+    });
   } else {
     // This case might indicate an issue if signIn resolves without accountId or error
     console.warn("@fastnear: signIn resolved without accountId or error.");
