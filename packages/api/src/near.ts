@@ -520,7 +520,7 @@ export const sendTx = async ({
   // this generates a mock transaction ID so we can keep track of each tx
   const txId = generateTxId();
 
-  if (!privKey || receiverId !== _state.accessKeyContractId || !canSignWithLAK(actions)) {
+  if (!privKey || receiverId !== _state.accessKeyContractId || !canSignWithLAK(actions) || hasNonZeroDeposit(actions)) {
     const jsonTx = { signerId, receiverId, actions };
     updateTxHistory({ status: "Pending", txId, tx: jsonTx, finalState: false });
 
@@ -649,6 +649,17 @@ export const sendTx = async ({
     console.error("Error Sending Transaction:", error, plainTransactionObj, signedTxBase64);
   }
 };
+
+function hasNonZeroDeposit(actions: Action[]): boolean {
+  for (const action of actions) {
+    if (action.type === "FunctionCall" || action.type === "Transfer") {
+      if (action.params.deposit && action.params.deposit !== "0") {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 // exports
 export const exp = {

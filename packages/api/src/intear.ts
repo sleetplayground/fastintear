@@ -6,15 +6,19 @@ import {
 } from "@fastnear/utils";
 import { ed25519 } from "@noble/curves/ed25519";
 import { sha256 } from "@noble/hashes/sha2";
-import { SignatureResult, WalletTxResult } from "./near";
+import { type SignatureResult, type WalletTxResult, signOut } from "./near";
 
 const DEFAULT_WALLET_DOMAIN = "https://wallet.intear.tech";
 const DEFAULT_LOGOUT_BRIDGE_SERVICE = "https://logout-bridge-service.intear.tech";
 const STORAGE_KEY = "_intear_wallet_connected_account";
 const POPUP_FEATURES = "width=400,height=700";
+
+let hasCheckedLogout = false;
+let checkingAccountPromise: Promise<LocalAccount[]> | null = null;
 interface LocalAccount {
   accountId: string;
   publicKey?: string;
+  active?: boolean;
 }
 
 interface LocalTransaction {
@@ -109,7 +113,8 @@ class LogoutWebSocket {
   private userLogoutPublicKey: string;
   private logoutBridgeServiceUrl: string;
   private intentionallyClosed = false;
-  private authFailedPermanently = false;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 3;
   private logger: Console;
 
   private constructor(
@@ -126,139 +131,149 @@ class LogoutWebSocket {
     this.userLogoutPublicKey = userLogoutPublicKey;
     this.logoutBridgeServiceUrl = logoutBridgeServiceUrl;
     this.logger = logger;
+    this.connect();
   }
 
   private async connect() {
-    if (this.authFailedPermanently) {
-      this.logger.warn("LogoutWebSocket: Permanent authentication failure. Not attempting to connect.");
-      // Ensure the static instance is cleared if we are in this state and connect is somehow called.
-      if (LogoutWebSocket.instance === this) {
-        LogoutWebSocket.instance = null;
-      }
-      return;
-    }
-    const wsUrl = this.logoutBridgeServiceUrl
-      .replace("https://", "wss://")
-      .replace("http://", "ws://");
-    this.ws = new WebSocket(`${wsUrl}/api/subscribe`);
+    try {
+      const wsUrl = this.logoutBridgeServiceUrl
+        .replace("https://", "wss://")
+        .replace("http://", "ws://");
+      this.ws = new WebSocket(`${wsUrl}/api/subscribe`);
 
-    this.ws.onopen = async () => {
-      if (!this.ws) {
-        return;
-      }
-
-      const nonce = Date.now();
-      const messageText = `subscribe|${nonce}`;
-      const messageBytes = new TextEncoder().encode(messageText);
-
-      const appPublicKeyString = publicKeyFromPrivate(this.appPrivateKey);
-      const signatureBase58 = signHash(messageBytes, this.appPrivateKey, { returnBase58: true }) as string;
-      const signatureString = `ed25519:${signatureBase58}`;
-
-      const authMessage: WsClientMessage = {
-        Auth: {
-          network: this.network,
-          account_id: this.accountId,
-          app_public_key: appPublicKeyString,
-          nonce,
-          signature: signatureString,
-        },
-      };
-
-      this.ws.send(JSON.stringify(authMessage));
-    };
-
-    this.ws.onmessage = async (event) => {
-      const message = JSON.parse(event.data as string) as WsServerMessage;
-
-      if ("Success" in message) {
-        this.logger.log("LogoutWebSocket:", message.Success.message);
-      } else if ("Error" in message) {
-        this.logger.error("LogoutWebSocket error:", message.Error.message);
-        if (message.Error.message.toLowerCase().includes("invalid signature")) {
-          this.logger.error(
-            "LogoutWebSocket: Authentication failed with 'Invalid signature'. Stopping reconnection attempts for this instance."
-          );
-          this.authFailedPermanently = true;
-          this.intentionallyClosed = true; // Signal that this closure is intentional to prevent reconnect
-          this.ws?.close(); // Close the WebSocket connection
-        }
-      } else if ("LoggedOut" in message) {
-        const { logout_info: logoutInfo } = message.LoggedOut;
-        this.logger.log("LogoutWebSocket: Received logout notification:", logoutInfo);
-
-        if (
-          logoutInfo.nonce > Date.now() ||
-          logoutInfo.nonce < Date.now() - 1000 * 60 * 5 // 5 minutes tolerance
-        ) {
-          this.logger.error("LogoutWebSocket: Invalid logout nonce:", logoutInfo.nonce);
+      this.ws.onopen = async () => {
+        // Reset reconnect attempts on successful connection
+        this.reconnectAttempts = 0;
+        if (!this.ws) {
           return;
         }
+
+        const nonce = Date.now();
+        const messageText = `subscribe|${nonce}`;
+        const messageBytes = new TextEncoder().encode(messageText);
 
         const appPublicKeyString = publicKeyFromPrivate(this.appPrivateKey);
-        const verifyMessageText = `logout|${logoutInfo.nonce}|${this.accountId}|${appPublicKeyString}`;
-        const verifyMessageBytes = new TextEncoder().encode(verifyMessageText);
-        const hashToVerifyBytes = sha256(verifyMessageBytes);
+        const signatureBase58 = signHash(messageBytes, this.appPrivateKey, { returnBase58: true }) as string;
+        const signatureString = `ed25519:${signatureBase58}`;
 
-        const sigParts = logoutInfo.signature.split(":");
-        if (sigParts.length !== 2 || (sigParts[0] !== "ed25519" && sigParts[0] !== "secp256k1")) {
-          this.logger.error("LogoutWebSocket: Invalid signature format:", logoutInfo.signature);
-          return;
+        const authMessage: WsClientMessage = {
+          Auth: {
+            network: this.network,
+            account_id: this.accountId,
+            app_public_key: appPublicKeyString,
+            nonce,
+            signature: signatureString,
+          },
+        };
+
+        this.ws.send(JSON.stringify(authMessage));
+      };
+
+      this.ws.onmessage = async (event) => {
+        const message = JSON.parse(event.data as string) as WsServerMessage;
+
+        if ("Success" in message) {
+          this.logger.log("LogoutWebSocket:", message.Success.message);
+        } else if ("Error" in message) {
+          this.logger.error("LogoutWebSocket error:", message.Error.message);
+        } else if ("LoggedOut" in message) {
+          const { logout_info: logoutInfo } = message.LoggedOut;
+          this.logger.log("LogoutWebSocket: Received logout notification:", logoutInfo);
+
+          if (
+            logoutInfo.nonce > Date.now() ||
+            logoutInfo.nonce < Date.now() - 1000 * 60 * 5 // 5 minutes tolerance
+          ) {
+            this.logger.error("LogoutWebSocket: Invalid logout nonce:", logoutInfo.nonce);
+            return;
+          }
+
+          const appPublicKeyString = publicKeyFromPrivate(this.appPrivateKey);
+          const verifyMessageText = `logout|${logoutInfo.nonce}|${this.accountId}|${appPublicKeyString}`;
+          const verifyMessageBytes = new TextEncoder().encode(verifyMessageText);
+
+          const sigParts = logoutInfo.signature.split(":");
+          if (sigParts.length !== 2 || (sigParts[0] !== "ed25519" && sigParts[0] !== "secp256k1")) {
+            this.logger.error("LogoutWebSocket: Invalid signature format:", logoutInfo.signature);
+            return;
+          }
+          const sigData = sigParts[1];
+          const signatureBytes = fromBase58(sigData);
+
+          let effectiveVerifyKey: string;
+          if (logoutInfo.caused_by === "User") {
+            effectiveVerifyKey = this.userLogoutPublicKey;
+          } else if (logoutInfo.caused_by === "App") {
+            effectiveVerifyKey = appPublicKeyString;
+          } else {
+            this.logger.error("LogoutWebSocket: Unknown logout cause:", logoutInfo.caused_by);
+            return;
+          }
+
+          // Convert effectiveVerifyKey string (e.g., "ed25519:...") to Uint8Array
+          let publicKeyBytes: Uint8Array;
+          const base58PublicKey = effectiveVerifyKey.substring("ed25519:".length);
+          publicKeyBytes = fromBase58(base58PublicKey);
+
+          const isValid = ed25519.verify(signatureBytes, verifyMessageBytes, publicKeyBytes);
+
+          if (!isValid) {
+            this.logger.error("LogoutWebSocket: Invalid logout signature");
+            return;
+          }
+
+          this.logger.log(
+            "LogoutWebSocket: Valid logout message received. Calling signOut and reloading."
+          );
+          // Call the signOut function from near.ts to properly update the application state
+          signOut();
+          this.intentionallyClosed = true;
+          this.close();
+          window.location.reload();
         }
-        const sigData = sigParts[1];
-        const signatureBytes = fromBase58(sigData);
+      };
 
-        let effectiveVerifyKey: string;
-        if (logoutInfo.caused_by === "User") {
-          effectiveVerifyKey = this.userLogoutPublicKey;
-        } else if (logoutInfo.caused_by === "App") {
-          effectiveVerifyKey = appPublicKeyString;
+      this.ws.onclose = () => {
+        this.logger.log("LogoutWebSocket: Connection closed.");
+        // If it was intentionally closed, do not attempt to reconnect
+        if (this.intentionallyClosed) {
+          // If this instance is the current static instance, nullify it
+          if (LogoutWebSocket.instance === this) {
+            LogoutWebSocket.instance = null;
+          }
+        } else if (this.reconnectAttempts < this.maxReconnectAttempts) {
+          this.reconnectAttempts++;
+          this.logger.log(`LogoutWebSocket: Attempting to reconnect in 500ms... (Attempt ${this.reconnectAttempts} of ${this.maxReconnectAttempts})`);
+          setTimeout(() => this.connect(), 500);
         } else {
-          this.logger.error("LogoutWebSocket: Unknown logout cause:", logoutInfo.caused_by);
-          return;
+          this.logger.warn(`LogoutWebSocket: Maximum reconnection attempts (${this.maxReconnectAttempts}) reached. Giving up.`);
+          if (LogoutWebSocket.instance === this) {
+            LogoutWebSocket.instance = null;
+          }
         }
+      };
 
-        // Convert effectiveVerifyKey string (e.g., "ed25519:...") to Uint8Array
-        let publicKeyBytes: Uint8Array;
-        const base58PublicKey = effectiveVerifyKey.substring("ed25519:".length);
-            publicKeyBytes = fromBase58(base58PublicKey);
-        
-        const isValid = ed25519.verify(signatureBytes, verifyMessageBytes, publicKeyBytes);
-
-        if (!isValid) {
-          this.logger.error("LogoutWebSocket: Invalid logout signature");
-          return;
-        }
-
-        this.logger.log(
-          "LogoutWebSocket: Valid logout message received. Clearing storage and reloading."
-        );
-        window.localStorage.removeItem(STORAGE_KEY);
-        this.intentionallyClosed = true;
-        this.close();
-        window.location.reload();
-      }
-    };
-
-    this.ws.onclose = () => {
-      this.logger.log("LogoutWebSocket: Connection closed.");
-      // If auth failed permanently for this instance, OR if it was intentionally closed for other reasons,
-      // do not attempt to reconnect.
-      if (this.authFailedPermanently || this.intentionallyClosed) {
-        // If this instance is the current static instance, nullify it.
-        // This handles the case where an auth failure leads to closure.
-        if (LogoutWebSocket.instance === this) {
+      this.ws.onerror = (error) => {
+        this.logger.warn("LogoutWebSocket: Error:", error);
+        if (!this.intentionallyClosed) {
+          if (this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.reconnectAttempts++;
+            this.logger.log(`LogoutWebSocket: Attempting to reconnect in 500ms... (Attempt ${this.reconnectAttempts} of ${this.maxReconnectAttempts})`);
+            setTimeout(() => this.connect(), 500);
+          } else {
+            this.logger.warn(`LogoutWebSocket: Maximum reconnection attempts (${this.maxReconnectAttempts}) reached. Giving up.`);
+            if (LogoutWebSocket.instance === this) {
+              LogoutWebSocket.instance = null;
+            }
+          }
+        } else {
           LogoutWebSocket.instance = null;
         }
-      } else {
-        this.logger.log("LogoutWebSocket: Attempting to reconnect in 500ms...");
-        setTimeout(() => this.connect(), 500);
-      }
-    };
-
-    this.ws.onerror = (error) => {
-      this.logger.error("LogoutWebSocket: Error:", error);
-    };
+      };
+    } catch (error) {
+      this.logger.warn("LogoutWebSocket: Error creating WebSocket connection:", error);
+      // Don't let WebSocket connection failures break the app
+    }
   }
 
   public static initialize(
@@ -268,40 +283,29 @@ class LogoutWebSocket {
     userLogoutPublicKey: string,
     logoutBridgeServiceUrl: string,
     logger: Console
-  ): LogoutWebSocket {
-    if (LogoutWebSocket.instance) {
-      const inst = LogoutWebSocket.instance;
-      if (
-        inst.network === network &&
-        inst.accountId === accountId &&
-        inst.appPrivateKey === appPrivateKey && // This is dataToSave.key
-        inst.userLogoutPublicKey === userLogoutPublicKey &&
-        inst.logoutBridgeServiceUrl === logoutBridgeServiceUrl &&
-        !inst.authFailedPermanently // Don't reuse if previously failed auth
-      ) {
-        // Instance exists, parameters match, and not in a failed state
-        return inst;
-      } else {
-        // Parameters differ, or previous instance failed auth. Close old and create new.
-        inst.logger.log(
-          "LogoutWebSocket: Re-initializing due to changed parameters or previous auth failure."
-        );
-        inst.close(); // This sets intentionallyClosed and onclose will nullify LogoutWebSocket.instance
-        LogoutWebSocket.instance = null; // Explicitly nullify here to be sure for immediate recreation
+  ): LogoutWebSocket | null {
+    try {
+      if (LogoutWebSocket.instance) {
+        // If an instance already exists, return it
+        return LogoutWebSocket.instance;
       }
-    }
 
-    // Create and connect new instance
-    LogoutWebSocket.instance = new LogoutWebSocket(
-      network,
-      accountId,
-      appPrivateKey,
-      userLogoutPublicKey,
-      logoutBridgeServiceUrl,
-      logger
-    );
-    LogoutWebSocket.instance.connect(); // Connect the new instance
-    return LogoutWebSocket.instance;
+      // Create and connect new instance
+      LogoutWebSocket.instance = new LogoutWebSocket(
+        network,
+        accountId,
+        appPrivateKey,
+        userLogoutPublicKey,
+        logoutBridgeServiceUrl,
+        logger
+      );
+
+      return LogoutWebSocket.instance;
+    } catch (error) {
+      // Catch any unexpected errors during initialization
+      logger.warn("LogoutWebSocket: Failed to initialize:", error);
+      return null;
+    }
   }
 
   public static getInstance(): LogoutWebSocket | null {
@@ -539,8 +543,7 @@ export class WalletAdapter {
     this.#onStateUpdate?.({ accountId: null, networkId: null, publicKey: null });
   }
 
-  // Consider calling this method once when the adapter is instantiated or app loads.
-  // For now, getState will also handle this initialization if needed.
+  // Initialize the session by checking if the user is logged in and setting up WebSocket connection
   async initializeSession(): Promise<void> {
     let savedData: SavedData;
 
@@ -548,11 +551,12 @@ export class WalletAdapter {
       savedData = assertLoggedIn();
     } catch (e) {
       if (e instanceof IntearAdapterError && e.message.includes("Not signed in")) {
+        // Not signed in, this is normal for new users
       } else {
         console.error("WalletAdapter: Error asserting login state:", e);
       }
       LogoutWebSocket.getInstance()?.close();
-      return; 
+      return;
     }
 
     // If assertLoggedIn succeeded, savedData is available. Proceed to check session.
@@ -575,7 +579,10 @@ export class WalletAdapter {
           `${this.#logoutBridgeService}/api/check_logout/${networkId}/${accountId}/${appPublicKeyString}`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              "Accept": "application/json"
+            },
             body: JSON.stringify({ nonce, signature: signatureString }),
           }
         );
@@ -590,7 +597,6 @@ export class WalletAdapter {
 
             const verifyMessageText = `logout|${logoutInfo.nonce}|${accountId}|${appPublicKeyString}`;
             const verifyMessageBytes = new TextEncoder().encode(verifyMessageText);
-            const hashToVerifyBytes = sha256(verifyMessageBytes);
             const sigParts = logoutInfo.signature.split(":");
 
             if (sigParts.length === 2 && (sigParts[0] === "ed25519" || sigParts[0] === "secp256k1")) {
@@ -625,23 +631,33 @@ export class WalletAdapter {
             LogoutWebSocket.getInstance()?.close(); // Ensure WS closed if session not active
           }
         } else { // fetch response not OK
-          console.error("WalletAdapter: Failed to check logout status with bridge:", await response.text());
-          LogoutWebSocket.getInstance()?.close(); // If bridge check fails, close WS
+          console.warn("WalletAdapter: Failed to check logout status with bridge:", await response.text());
+          // Continue with session initialization despite bridge check failure
+          // This prevents network issues from breaking the application
+          sessionConfirmedActive = true; // Assume session is active if we can't check
         }
       } catch (fetchError) { // Error during the fetch call itself
-        console.error("WalletAdapter: Network error during bridge service logout check:", fetchError);
-        LogoutWebSocket.getInstance()?.close(); // If fetch itself fails, close WS
+        console.warn("WalletAdapter: Network error during bridge service logout check:", fetchError);
+        // If there's a network issue, we'll still proceed with the session
+        // This prevents CORS or network issues from breaking the application
+        sessionConfirmedActive = true; // Assume session is active if we can't check
       }
 
+      // Try to initialize WebSocket connection, but don't let failures break the app
       if (sessionConfirmedActive) {
-        LogoutWebSocket.initialize(
+        try {
+          LogoutWebSocket.initialize(
             savedData.networkId,
             savedData.accounts[0].accountId,
             savedData.key,
             savedData.logoutKey,
             this.#logoutBridgeService,
             console
-        );
+          );
+        } catch (wsError) {
+          console.warn("WalletAdapter: Failed to initialize WebSocket connection:", wsError);
+          // Continue without WebSocket connection
+        }
       } else {
         LogoutWebSocket.getInstance()?.close(); // Ensure WS closed if not active
       }
@@ -670,6 +686,136 @@ export class WalletAdapter {
   setState(state: any): void {
     console.warn("WalletAdapter: setState called, but state is primarily managed in localStorage for this adapter.");
     this.#onStateUpdate?.(state);
+  }
+
+  async getAccounts(): Promise<LocalAccount[]> {
+    console.log("WalletAdapter: getAccounts");
+    const savedData = (() => {
+      try {
+        return assertLoggedIn();
+      } catch {
+        return null;
+      }
+    })();
+
+    if (savedData && !hasCheckedLogout) {
+      if (checkingAccountPromise) {
+        return await checkingAccountPromise;
+      }
+      checkingAccountPromise = new Promise<Array<LocalAccount>>(
+        // eslint-disable-next-line no-async-promise-executor
+        async (resolve) => {
+          try {
+            const account = savedData.accounts[0];
+            const networkId = savedData.networkId;
+            const appPrivateKey = savedData.key;
+            const appPublicKeyString = publicKeyFromPrivate(appPrivateKey);
+
+            LogoutWebSocket.initialize(
+              networkId,
+              account.accountId,
+              appPrivateKey,
+              savedData.logoutKey,
+              this.#logoutBridgeService,
+              console
+            );
+
+            const nonce = Date.now();
+            const logoutCheckMessage = `check|${nonce}`;
+            const messageBytes = new TextEncoder().encode(logoutCheckMessage);
+            const signatureBase58 = signHash(messageBytes, appPrivateKey, { returnBase58: true }) as string;
+            const signatureString = `ed25519:${signatureBase58}`;
+
+            const response = await fetch(
+              `${this.#logoutBridgeService}/api/check_logout/${networkId}/${
+                account.accountId
+              }/${appPublicKeyString}`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  nonce,
+                  signature: signatureString,
+                }),
+              }
+            );
+
+            if (!response.ok) {
+              console.error(
+                "WalletAdapter: Failed to check logout status:",
+                await response.text()
+              );
+              resolve(savedData.accounts);
+              return;
+            }
+
+            const status = (await response.json()) as SessionStatus;
+            console.log("WalletAdapter: Logout check response:", status);
+
+            if (status !== "Active") {
+              const logoutInfo = (status as { LoggedOut: LogoutInfo }).LoggedOut;
+              console.log("WalletAdapter: User was logged out:", logoutInfo);
+
+              // Verify the logout signature
+              const logoutMessageToVerify = `logout|${logoutInfo.nonce}|${
+                account.accountId
+              }|${appPublicKeyString}`;
+              const sigData = logoutInfo.signature.split(":")[1];
+              const signatureToVerify = fromBase58(sigData);
+
+              let verifyKey: string;
+              if (logoutInfo.caused_by === "User") {
+                verifyKey = savedData.logoutKey;
+              } else if (logoutInfo.caused_by === "App") {
+                // No idea how the user can be signed out by the app and the app doesn't
+                // know that, but whatever, handle this anyway
+                verifyKey = appPublicKeyString;
+              } else {
+                console.error("WalletAdapter: Unknown logout cause:", logoutInfo.caused_by);
+                resolve(savedData.accounts);
+                return;
+              }
+
+              const base58PublicKey = verifyKey.substring("ed25519:".length);
+              const publicKeyBytes = fromBase58(base58PublicKey);
+              
+              const isValid = ed25519.verify(
+                signatureToVerify,
+                new TextEncoder().encode(logoutMessageToVerify),
+                publicKeyBytes
+              );
+
+              if (!isValid) {
+                console.error("WalletAdapter: Invalid logout signature");
+                resolve(savedData.accounts);
+                return;
+              }
+
+              // Only clear storage if signature is valid
+              console.log("WalletAdapter: Signed out on the wallet side");
+              window.localStorage.removeItem(STORAGE_KEY);
+              LogoutWebSocket.getInstance()?.close();
+              resolve([]);
+            } else {
+              resolve(savedData.accounts);
+            }
+          } catch (error) {
+            console.error("WalletAdapter: Failed to check logout status:", error);
+            // Continue with saved data if we can't check logout status
+            resolve(savedData.accounts);
+          }
+        }
+      ).finally(() => {
+        checkingAccountPromise = null;
+        hasCheckedLogout = true;
+      });
+      return await checkingAccountPromise;
+    }
+
+    console.log("WalletAdapter: Accounts:", savedData?.accounts ?? []);
+    return savedData?.accounts ?? [];
   }
 
   async sendTransactions({ transactions }: { transactions: LocalTransaction[] }): Promise<WalletTxResult> {
