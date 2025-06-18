@@ -6,7 +6,8 @@ import {
 } from "@fastnear/utils";
 import { ed25519 } from "@noble/curves/ed25519";
 import { sha256 } from "@noble/hashes/sha2";
-import { type SignatureResult, type WalletTxResult, signOut } from "./near";
+import type { Account, SignatureResult, WalletTxResult } from "./near";
+import { signOut } from "./near";
 
 const DEFAULT_WALLET_DOMAIN = "https://wallet.intear.tech";
 const DEFAULT_LOGOUT_BRIDGE_SERVICE = "https://logout-bridge-service.intear.tech";
@@ -14,23 +15,13 @@ const STORAGE_KEY = "_intear_wallet_connected_account";
 const POPUP_FEATURES = "width=400,height=700";
 
 let hasCheckedLogout = false;
-let checkingAccountPromise: Promise<LocalAccount[]> | null = null;
-interface LocalAccount {
-  accountId: string;
-  publicKey?: string;
-  active?: boolean;
-}
+let checkingAccountPromise: Promise<Account[]> | null = null;
+let sessionVerificationInProgress = false;
 
-interface LocalTransaction {
+interface Transaction {
   signerId?: string;
   receiverId: string;
   actions: any[]; // Use 'any' for simplicity
-}
-
-export interface SignInResult {
-  url?: string;
-  accountId?: string;
-  error?: string;
 }
 
 export interface TransactionResult {
@@ -54,7 +45,7 @@ export interface WalletAdapterConstructor {
 }
 
 interface SavedData {
-  accounts: LocalAccount[];
+  accounts: Account[];
   key: string;
   contractId: string;
   methodNames: string[];
@@ -180,6 +171,8 @@ class LogoutWebSocket {
           const { logout_info: logoutInfo } = message.LoggedOut;
           this.logger.log("LogoutWebSocket: Received logout notification:", logoutInfo);
 
+          // TODO: verify, 
+          // validateNonce
           if (
             logoutInfo.nonce > Date.now() ||
             logoutInfo.nonce < Date.now() - 1000 * 60 * 5 // 5 minutes tolerance
@@ -189,7 +182,7 @@ class LogoutWebSocket {
           }
 
           const appPublicKeyString = publicKeyFromPrivate(this.appPrivateKey);
-          const verifyMessageText = `logout|${logoutInfo.nonce}|${this.accountId}|${appPublicKeyString}`;
+          const verifyMessageText = `logout|${logoutInfo.nonce}|${this.accountId}|${appPublicKeyString}`; // validateMessage
           const verifyMessageBytes = new TextEncoder().encode(verifyMessageText);
 
           const sigParts = logoutInfo.signature.split(":");
@@ -204,6 +197,8 @@ class LogoutWebSocket {
           if (logoutInfo.caused_by === "User") {
             effectiveVerifyKey = this.userLogoutPublicKey;
           } else if (logoutInfo.caused_by === "App") {
+            // No idea how the user can be signed out by the app and the app doesn't
+            // know that, but whatever, handle this anyway
             effectiveVerifyKey = appPublicKeyString;
           } else {
             this.logger.error("LogoutWebSocket: Unknown logout cause:", logoutInfo.caused_by);
@@ -327,8 +322,9 @@ async function generateAuthSignature(
   data: string,
   nonce: number
 ): Promise<string> {
-  const messageToSign = nonce.toString() + "|" + data;
-  const messageBytes = new TextEncoder().encode(messageToSign);
+  // TODO: replace with near-sign-verify? sign(message, options)
+  const messageToSign = nonce.toString() + "|" + data; // need to append TAG, could break his verify
+  const messageBytes = new TextEncoder().encode(messageToSign); // maybe we should adopt nonce prepended in messages
   const hashBytes = sha256(messageBytes);
 
   const signatureBase58 = signHash(hashBytes, privateKey, { returnBase58: true }) as string;
@@ -357,6 +353,149 @@ function assertLoggedIn(): SavedData {
   }
 }
 
+/**
+ * Safely get saved data without throwing
+ * @returns SavedData or null if not logged in or error
+ */
+function getSavedData(): SavedData | null {
+  try {
+    return assertLoggedIn();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Verify a logout signature from the bridge service
+ * @returns true if signature is valid, false otherwise
+ */
+function verifyLogoutSignature(
+  logoutInfo: LogoutInfo,
+  accountId: string,
+  appPublicKeyString: string,
+  userLogoutPublicKey: string
+): boolean {
+  try {
+    const logoutMessageToVerify = `logout|${logoutInfo.nonce}|${accountId}|${appPublicKeyString}`;
+    const sigParts = logoutInfo.signature.split(":");
+
+    if (sigParts.length !== 2 || (sigParts[0] !== "ed25519" && sigParts[0] !== "secp256k1")) {
+      console.error("WalletAdapter: Invalid signature format:", logoutInfo.signature);
+      return false;
+    }
+
+    const sigData = sigParts[1];
+    const signatureToVerify = fromBase58(sigData);
+
+    let verifyKey: string;
+    if (logoutInfo.caused_by === "User") {
+      verifyKey = userLogoutPublicKey;
+    } else if (logoutInfo.caused_by === "App") {
+      verifyKey = appPublicKeyString;
+    } else {
+      console.error("WalletAdapter: Unknown logout cause:", logoutInfo.caused_by);
+      return false;
+    }
+
+    const base58PublicKey = verifyKey.substring("ed25519:".length);
+    const publicKeyBytes = fromBase58(base58PublicKey);
+
+    return ed25519.verify(
+      signatureToVerify,
+      new TextEncoder().encode(logoutMessageToVerify),
+      publicKeyBytes
+    );
+  } catch (error) {
+    console.error("WalletAdapter: Error verifying logout signature:", error);
+    return false;
+  }
+}
+
+/**
+ * Verify session status with the bridge service
+ * @returns Object with session status and accounts
+ */
+async function verifySessionStatus(
+  savedData: SavedData,
+  logoutBridgeService: string,
+  onStateUpdate?: (state: any) => void
+): Promise<{ isActive: boolean; accounts: Account[] }> {
+  try {
+    const account = savedData.accounts[0];
+    const networkId = savedData.networkId;
+    const appPrivateKey = savedData.key;
+    const appPublicKeyString = publicKeyFromPrivate(appPrivateKey);
+
+    // Initialize WebSocket for real-time logout notifications
+    LogoutWebSocket.initialize(
+      networkId,
+      account.accountId,
+      appPrivateKey,
+      savedData.logoutKey,
+      logoutBridgeService,
+      console
+    );
+
+    // Check current session status
+    const nonce = Date.now();
+    const checkMessage = `check|${nonce}`;
+    const messageBytes = new TextEncoder().encode(checkMessage);
+    const signatureBase58 = signHash(messageBytes, appPrivateKey, { returnBase58: true }) as string;
+    const signatureString = `ed25519:${signatureBase58}`;
+
+    const response = await fetch(
+      `${logoutBridgeService}/api/check_logout/${networkId}/${account.accountId}/${appPublicKeyString}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        body: JSON.stringify({ nonce, signature: signatureString }),
+      }
+    );
+
+    if (!response.ok) {
+      console.warn("WalletAdapter: Failed to check logout status:", await response.text());
+      return { isActive: true, accounts: savedData.accounts }; // Assume active if we can't check
+    }
+
+    const status = (await response.json()) as SessionStatus;
+    console.log("WalletAdapter: Logout check response:", status);
+
+    if (status === "Active") {
+      return { isActive: true, accounts: savedData.accounts };
+    } else {
+      // Handle logout case
+      const logoutInfo = (status as { LoggedOut: LogoutInfo }).LoggedOut;
+      console.log("WalletAdapter: User was logged out:", logoutInfo);
+
+      // Verify the logout signature
+      const isValid = verifyLogoutSignature(
+        logoutInfo,
+        account.accountId,
+        appPublicKeyString,
+        savedData.logoutKey
+      );
+
+      if (!isValid) {
+        console.error("WalletAdapter: Invalid logout signature");
+        return { isActive: true, accounts: savedData.accounts }; // Treat as active if signature invalid
+      }
+
+      // Clear storage if signature is valid
+      console.log("WalletAdapter: Valid remote logout. Clearing local session.");
+      window.localStorage.removeItem(STORAGE_KEY);
+      LogoutWebSocket.getInstance()?.close();
+      onStateUpdate?.({ accountId: null, networkId: null, publicKey: null });
+      return { isActive: false, accounts: [] };
+    }
+  } catch (error) {
+    console.error("WalletAdapter: Error verifying session status:", error);
+    return { isActive: true, accounts: savedData.accounts }; // Assume active on error
+  }
+}
+
 export class WalletAdapter {
   #walletUrl: string;
   #logoutBridgeService: string;
@@ -381,7 +520,7 @@ export class WalletAdapter {
     }
   }
 
-  async signIn({ contractId, methodNames, networkId }: { contractId?: string; methodNames?: string[]; networkId: string; }): Promise<{ accountId: string, accounts: LocalAccount[], privateKey?: string, publicKey?: string, error?: string }> {
+  async signIn({ contractId, methodNames, networkId }: { contractId?: string; methodNames?: string[]; networkId: string; }): Promise<{ accountId: string, accounts: Account[], privateKey?: string, publicKey?: string, error?: string }> {
     console.log("WalletAdapter: signIn", { contractId, methodNames, networkId });
     const privateKey = privateKeyFromRandom();
 
@@ -430,7 +569,7 @@ export class WalletAdapter {
             popup.close();
             window.removeEventListener("message", listener);
 
-            const accounts = event.data.accounts as LocalAccount[];
+            const accounts = event.data.accounts as Account[];
             if (!accounts || accounts.length === 0) {
               return reject(new IntearAdapterError("No accounts returned from wallet"));
             }
@@ -447,7 +586,12 @@ export class WalletAdapter {
             };
             window.localStorage.setItem(STORAGE_KEY, JSON.stringify(dataToSave));
 
-            const newState = { accountId: accounts[0].accountId, networkId };
+            const newState = {
+              accountId: accounts[0].accountId,
+              networkId,
+              privateKey: dataToSave.key,
+              publicKey: publicKeyFromPrivate(dataToSave.key)
+            };
             this.#onStateUpdate?.(newState);
 
             // Ensure any old WebSocket instance is closed before initializing a new one
@@ -495,13 +639,7 @@ export class WalletAdapter {
 
   async signOut(): Promise<void> {
     console.log("WalletAdapter: signOut");
-    const savedData = (() => {
-      try {
-        return assertLoggedIn();
-      } catch {
-        return null;
-      }
-    })();
+    const savedData = getSavedData();
 
     LogoutWebSocket.getInstance()?.close();
 
@@ -545,280 +683,88 @@ export class WalletAdapter {
 
   // Initialize the session by checking if the user is logged in and setting up WebSocket connection
   async initializeSession(): Promise<void> {
-    let savedData: SavedData;
-
-    try {
-      savedData = assertLoggedIn();
-    } catch (e) {
-      if (e instanceof IntearAdapterError && e.message.includes("Not signed in")) {
-        // Not signed in, this is normal for new users
-      } else {
-        console.error("WalletAdapter: Error asserting login state:", e);
-      }
-      LogoutWebSocket.getInstance()?.close();
+    // Prevent multiple simultaneous session verifications
+    if (sessionVerificationInProgress) {
       return;
     }
 
-    // If assertLoggedIn succeeded, savedData is available. Proceed to check session.
+    sessionVerificationInProgress = true;
+
     try {
-      const accountId = savedData.accounts[0].accountId;
-      const appPrivateKey = savedData.key;
-      const appPublicKeyString = publicKeyFromPrivate(appPrivateKey);
-      const networkId = savedData.networkId;
-      const nonce = Date.now();
+      const savedData = getSavedData();
 
-      const messageText = `check|${nonce}`;
-      const messageBytes = new TextEncoder().encode(messageText);
-      const signatureBase58 = signHash(messageBytes, appPrivateKey, { returnBase58: true }) as string;
-      const signatureString = `ed25519:${signatureBase58}`;
-
-      let sessionConfirmedActive = false;
-
-      try {
-        const response = await fetch(
-          `${this.#logoutBridgeService}/api/check_logout/${networkId}/${accountId}/${appPublicKeyString}`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Accept": "application/json"
-            },
-            body: JSON.stringify({ nonce, signature: signatureString }),
-          }
-        );
-
-        if (response.ok) {
-          const status = (await response.json()) as SessionStatus;
-          if (status === "Active") {
-            sessionConfirmedActive = true;
-          } else { // LoggedOut or other non-Active status from bridge
-            const logoutInfo = (status as { LoggedOut: LogoutInfo }).LoggedOut;
-            console.log("WalletAdapter: User session logged out per bridge check.", logoutInfo);
-
-            const verifyMessageText = `logout|${logoutInfo.nonce}|${accountId}|${appPublicKeyString}`;
-            const verifyMessageBytes = new TextEncoder().encode(verifyMessageText);
-            const sigParts = logoutInfo.signature.split(":");
-
-            if (sigParts.length === 2 && (sigParts[0] === "ed25519" || sigParts[0] === "secp256k1")) {
-              const sigData = sigParts[1];
-              const signatureBytesToVerify = fromBase58(sigData);
-              let effectiveVerifyKey: string;
-
-              if (logoutInfo.caused_by === "User") {
-                effectiveVerifyKey = savedData.logoutKey;
-              } else if (logoutInfo.caused_by === "App") {
-                effectiveVerifyKey = appPublicKeyString;
-              } else {
-                console.error("WalletAdapter: Unknown logout cause from bridge check:", logoutInfo.caused_by);
-                LogoutWebSocket.getInstance()?.close(); // Ensure WS is closed
-                return; // Do not proceed to initialize WS
-              }
-
-              const base58PublicKeyForBridge = effectiveVerifyKey.substring("ed25519:".length);
-              const publicKeyBytesForBridge = fromBase58(base58PublicKeyForBridge);
-
-              const isValid = ed25519.verify(signatureBytesToVerify, verifyMessageBytes, publicKeyBytesForBridge);
-              if (isValid) {
-                console.log("WalletAdapter: Valid remote logout. Clearing local session.");
-                window.localStorage.removeItem(STORAGE_KEY);
-                this.#onStateUpdate?.({ accountId: null, networkId: null, publicKey: null });
-              } else {
-                console.error("WalletAdapter: Invalid signature in remote logout notification. Local data not cleared based on this.");
-              }
-            } else {
-              console.error("WalletAdapter: Invalid signature format in remote logout notification. Local data not cleared.");
-            }
-            LogoutWebSocket.getInstance()?.close(); // Ensure WS closed if session not active
-          }
-        } else { // fetch response not OK
-          console.warn("WalletAdapter: Failed to check logout status with bridge:", await response.text());
-          // Continue with session initialization despite bridge check failure
-          // This prevents network issues from breaking the application
-          sessionConfirmedActive = true; // Assume session is active if we can't check
-        }
-      } catch (fetchError) { // Error during the fetch call itself
-        console.warn("WalletAdapter: Network error during bridge service logout check:", fetchError);
-        // If there's a network issue, we'll still proceed with the session
-        // This prevents CORS or network issues from breaking the application
-        sessionConfirmedActive = true; // Assume session is active if we can't check
+      if (!savedData) {
+        // Not signed in, this is normal for new users
+        LogoutWebSocket.getInstance()?.close();
+        return;
       }
 
-      // Try to initialize WebSocket connection, but don't let failures break the app
-      if (sessionConfirmedActive) {
-        try {
-          LogoutWebSocket.initialize(
-            savedData.networkId,
-            savedData.accounts[0].accountId,
-            savedData.key,
-            savedData.logoutKey,
-            this.#logoutBridgeService,
-            console
-          );
-        } catch (wsError) {
-          console.warn("WalletAdapter: Failed to initialize WebSocket connection:", wsError);
-          // Continue without WebSocket connection
-        }
-      } else {
-        LogoutWebSocket.getInstance()?.close(); // Ensure WS closed if not active
-      }
+      // Use the shared session verification function
+      await verifySessionStatus(savedData, this.#logoutBridgeService, this.#onStateUpdate);
 
     } catch (e) {
-      // This outer try-catch handles unexpected errors during the main logic (after savedData is confirmed).
-      console.error("WalletAdapter: Unexpected error during session initialization logic:", e);
-      LogoutWebSocket.getInstance()?.close(); // Final safety net
+      console.error("WalletAdapter: Unexpected error during session initialization:", e);
+      LogoutWebSocket.getInstance()?.close();
+    } finally {
+      sessionVerificationInProgress = false;
     }
   }
 
 
   getState(): { accountId: string | null; networkId: string | null; publicKey?: string | null } {
-    try {
-      const savedData = assertLoggedIn();
+    const savedData = getSavedData();
+
+    if (savedData) {
       return {
         accountId: savedData.accounts[0].accountId,
         networkId: savedData.networkId,
         publicKey: publicKeyFromPrivate(savedData.key),
       };
-    } catch (e) {
-      return { accountId: null, networkId: null, publicKey: null };
     }
+
+    return { accountId: null, networkId: null, publicKey: null };
   }
 
   setState(state: any): void {
-    console.warn("WalletAdapter: setState called, but state is primarily managed in localStorage for this adapter.");
+    // console.warn("WalletAdapter: setState called, but state is primarily managed in localStorage for this adapter.");
     this.#onStateUpdate?.(state);
   }
 
-  async getAccounts(): Promise<LocalAccount[]> {
-    console.log("WalletAdapter: getAccounts");
-    const savedData = (() => {
-      try {
-        return assertLoggedIn();
-      } catch {
-        return null;
-      }
-    })();
+  async getAccounts(): Promise<Account[]> {
+    // console.log("WalletAdapter: getAccounts");
+    const savedData = getSavedData();
 
-    if (savedData && !hasCheckedLogout) {
+    if (!savedData) {
+      return [];
+    }
+
+    if (!hasCheckedLogout) {
       if (checkingAccountPromise) {
         return await checkingAccountPromise;
       }
-      checkingAccountPromise = new Promise<Array<LocalAccount>>(
-        // eslint-disable-next-line no-async-promise-executor
-        async (resolve) => {
-          try {
-            const account = savedData.accounts[0];
-            const networkId = savedData.networkId;
-            const appPrivateKey = savedData.key;
-            const appPublicKeyString = publicKeyFromPrivate(appPrivateKey);
 
-            LogoutWebSocket.initialize(
-              networkId,
-              account.accountId,
-              appPrivateKey,
-              savedData.logoutKey,
-              this.#logoutBridgeService,
-              console
-            );
-
-            const nonce = Date.now();
-            const logoutCheckMessage = `check|${nonce}`;
-            const messageBytes = new TextEncoder().encode(logoutCheckMessage);
-            const signatureBase58 = signHash(messageBytes, appPrivateKey, { returnBase58: true }) as string;
-            const signatureString = `ed25519:${signatureBase58}`;
-
-            const response = await fetch(
-              `${this.#logoutBridgeService}/api/check_logout/${networkId}/${
-                account.accountId
-              }/${appPublicKeyString}`,
-              {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                  nonce,
-                  signature: signatureString,
-                }),
-              }
-            );
-
-            if (!response.ok) {
-              console.error(
-                "WalletAdapter: Failed to check logout status:",
-                await response.text()
-              );
-              resolve(savedData.accounts);
-              return;
-            }
-
-            const status = (await response.json()) as SessionStatus;
-            console.log("WalletAdapter: Logout check response:", status);
-
-            if (status !== "Active") {
-              const logoutInfo = (status as { LoggedOut: LogoutInfo }).LoggedOut;
-              console.log("WalletAdapter: User was logged out:", logoutInfo);
-
-              // Verify the logout signature
-              const logoutMessageToVerify = `logout|${logoutInfo.nonce}|${
-                account.accountId
-              }|${appPublicKeyString}`;
-              const sigData = logoutInfo.signature.split(":")[1];
-              const signatureToVerify = fromBase58(sigData);
-
-              let verifyKey: string;
-              if (logoutInfo.caused_by === "User") {
-                verifyKey = savedData.logoutKey;
-              } else if (logoutInfo.caused_by === "App") {
-                // No idea how the user can be signed out by the app and the app doesn't
-                // know that, but whatever, handle this anyway
-                verifyKey = appPublicKeyString;
-              } else {
-                console.error("WalletAdapter: Unknown logout cause:", logoutInfo.caused_by);
-                resolve(savedData.accounts);
-                return;
-              }
-
-              const base58PublicKey = verifyKey.substring("ed25519:".length);
-              const publicKeyBytes = fromBase58(base58PublicKey);
-              
-              const isValid = ed25519.verify(
-                signatureToVerify,
-                new TextEncoder().encode(logoutMessageToVerify),
-                publicKeyBytes
-              );
-
-              if (!isValid) {
-                console.error("WalletAdapter: Invalid logout signature");
-                resolve(savedData.accounts);
-                return;
-              }
-
-              // Only clear storage if signature is valid
-              console.log("WalletAdapter: Signed out on the wallet side");
-              window.localStorage.removeItem(STORAGE_KEY);
-              LogoutWebSocket.getInstance()?.close();
-              resolve([]);
-            } else {
-              resolve(savedData.accounts);
-            }
-          } catch (error) {
-            console.error("WalletAdapter: Failed to check logout status:", error);
-            // Continue with saved data if we can't check logout status
-            resolve(savedData.accounts);
-          }
+      checkingAccountPromise = new Promise<Array<Account>>(async (resolve) => {
+        try {
+          // Use the shared session verification function
+          const result = await verifySessionStatus(savedData, this.#logoutBridgeService, this.#onStateUpdate);
+          resolve(result.accounts);
+        } catch (error) {
+          console.error("WalletAdapter: Error in getAccounts:", error);
+          resolve(savedData.accounts); // Return accounts on error
         }
-      ).finally(() => {
+      }).finally(() => {
         checkingAccountPromise = null;
         hasCheckedLogout = true;
       });
+
       return await checkingAccountPromise;
     }
 
-    console.log("WalletAdapter: Accounts:", savedData?.accounts ?? []);
-    return savedData?.accounts ?? [];
+    console.log("WalletAdapter: Accounts:", savedData.accounts);
+    return savedData.accounts;
   }
 
-  async sendTransactions({ transactions }: { transactions: LocalTransaction[] }): Promise<WalletTxResult> {
+  async sendTransactions({ transactions }: { transactions: Transaction[] }): Promise<WalletTxResult> {
     console.log("WalletAdapter: sendTransactions", { transactions });
     const savedData = assertLoggedIn(); // Throws if not logged in
     const privateKey = savedData.key;

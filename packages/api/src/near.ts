@@ -274,7 +274,29 @@ export function generateTxId(): string {
   return `tx-${Date.now()}-${parseInt(randomPart, 10).toString(36)}`;
 }
 
-export const accountId = () => _state.accountId;
+let lastAccountCheckTime = 0;
+const ACCOUNT_CHECK_INTERVAL = 60000; // 1 minute
+
+export const accountId = () => {
+  const currentTime = Date.now();
+  
+  // only trigger check if enough time has passed since last check
+  if (_state.accountId && currentTime - lastAccountCheckTime > ACCOUNT_CHECK_INTERVAL) {
+    lastAccountCheckTime = currentTime;
+    
+    _adapter.getAccounts().then(accounts => {
+      if (accounts.length === 0 && _state.accountId) {
+        // update state if logged out (will be realized in next near.accountId() call)
+        update({ accountId: null, privateKey: null, lastWalletId: null });
+      }
+    }).catch(e => {
+      console.error("Error checking account status:", e);
+    });
+  }
+  
+  return _state.accountId;
+};
+
 export const publicKey = () => _state.publicKey;
 
 export const config = (newConfig?: Record<string, any>) => {
@@ -449,6 +471,14 @@ export interface SignatureResult {
   accountId: string;
   publicKey: string;
   signature: string;
+}
+
+// kinda temporary, could be better -- but really, who would be using this?
+// Helpful for wallets
+export interface Account {
+  accountId: string;
+  publicKey?: string;
+  active?: boolean;
 }
 
 /**
