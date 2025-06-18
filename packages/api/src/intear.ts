@@ -461,14 +461,14 @@ async function verifySessionStatus(
     }
 
     const status = (await response.json()) as SessionStatus;
-    console.log("WalletAdapter: Logout check response:", status);
+    console.debug("WalletAdapter: Logout check response:", status);
 
     if (status === "Active") {
       return { isActive: true, accounts: savedData.accounts };
     } else {
       // Handle logout case
       const logoutInfo = (status as { LoggedOut: LogoutInfo }).LoggedOut;
-      console.log("WalletAdapter: User was logged out:", logoutInfo);
+      console.debug("WalletAdapter: User was logged out:", logoutInfo);
 
       // Verify the logout signature
       const isValid = verifyLogoutSignature(
@@ -484,7 +484,7 @@ async function verifySessionStatus(
       }
 
       // Clear storage if signature is valid
-      console.log("WalletAdapter: Valid remote logout. Clearing local session.");
+      console.debug("WalletAdapter: Valid remote logout. Clearing local session.");
       window.localStorage.removeItem(STORAGE_KEY);
       LogoutWebSocket.getInstance()?.close();
       onStateUpdate?.({ accountId: null, networkId: null, publicKey: null });
@@ -512,7 +512,7 @@ export class WalletAdapter {
     this.#walletUrl = walletUrl;
     this.#logoutBridgeService = logoutBridgeService;
     this.#onStateUpdate = onStateUpdate;
-    console.log("Intear Popup WalletAdapter initialized. URL:", this.#walletUrl);
+    console.debug("Intear Popup WalletAdapter initialized. URL:", this.#walletUrl);
     if (typeof window !== 'undefined') {
       this.initializeSession().catch(err => {
         console.error("Error during initial session initialization:", err);
@@ -521,7 +521,7 @@ export class WalletAdapter {
   }
 
   async signIn({ contractId, methodNames, networkId }: { contractId?: string; methodNames?: string[]; networkId: string; }): Promise<{ accountId: string, accounts: Account[], privateKey?: string, publicKey?: string, error?: string }> {
-    console.log("WalletAdapter: signIn", { contractId, methodNames, networkId });
+    console.debug("WalletAdapter: signIn", { contractId, methodNames, networkId });
     const privateKey = privateKeyFromRandom();
 
     return new Promise((resolve, reject) => {
@@ -539,7 +539,7 @@ export class WalletAdapter {
           return;
         }
 
-        console.log("Message from connect popup", event.data);
+        console.debug("Message from connect popup", event.data);
         switch (event.data.type) {
           case "ready": {
             const origin = location.origin || "file://local-html-file";
@@ -638,7 +638,7 @@ export class WalletAdapter {
   }
 
   async signOut(): Promise<void> {
-    console.log("WalletAdapter: signOut");
+    console.debug("WalletAdapter: signOut");
     const savedData = getSavedData();
 
     LogoutWebSocket.getInstance()?.close();
@@ -670,7 +670,7 @@ export class WalletAdapter {
         if (!response.ok) {
           console.error("WalletAdapter: Failed to notify bridge service of logout:", await response.text());
         } else {
-          console.log("WalletAdapter: Successfully notified bridge service of logout");
+          console.debug("WalletAdapter: Successfully notified bridge service of logout");
         }
       } catch (e) {
         console.error("WalletAdapter: Error during bridge service logout notification:", e);
@@ -731,7 +731,7 @@ export class WalletAdapter {
   }
 
   async getAccounts(): Promise<Account[]> {
-    // console.log("WalletAdapter: getAccounts");
+    console.debug("WalletAdapter: getAccounts");
     const savedData = getSavedData();
 
     if (!savedData) {
@@ -760,12 +760,12 @@ export class WalletAdapter {
       return await checkingAccountPromise;
     }
 
-    console.log("WalletAdapter: Accounts:", savedData.accounts);
+    console.debug("WalletAdapter: Accounts:", savedData.accounts);
     return savedData.accounts;
   }
 
   async sendTransactions({ transactions }: { transactions: Transaction[] }): Promise<WalletTxResult> {
-    console.log("WalletAdapter: sendTransactions", { transactions });
+    console.debug("WalletAdapter: sendTransactions", { transactions });
     const savedData = assertLoggedIn(); // Throws if not logged in
     const privateKey = savedData.key;
     const accountId = savedData.accounts[0].accountId;
@@ -781,7 +781,7 @@ export class WalletAdapter {
         if (event.origin !== new URL(this.#walletUrl).origin) return;
         if (!event.data || !event.data.type) return;
 
-        console.log("Message from send-transactions popup", event.data);
+        console.debug("Message from send-transactions popup", event.data);
         switch (event.data.type) {
           case "ready": {
             const transactionsString = JSON.stringify(transactions);
@@ -834,7 +834,7 @@ export class WalletAdapter {
   }
 
   async signMessage({ message, nonce, recipient, callbackUrl, state }: { message: string, nonce: Buffer, recipient: string, callbackUrl?: string, state?: string }): Promise<SignatureResult> {
-    console.log("WalletAdapter: signMessage", { message, nonce, recipient });
+    console.debug("WalletAdapter: signMessage", { message, nonce, recipient });
     const savedData = assertLoggedIn();
     const privateKey = savedData.key;
     const accountId = savedData.accounts[0].accountId;
@@ -850,7 +850,7 @@ export class WalletAdapter {
         if (event.origin !== new URL(this.#walletUrl).origin) return;
         if (!event.data || !event.data.type) return;
 
-        console.log("Message from sign-message popup", event.data);
+        console.debug("Message from sign-message popup", event.data);
         switch (event.data.type) {
           case "ready": {
             const signMessageString = JSON.stringify({
@@ -918,7 +918,7 @@ export class WalletAdapter {
   }
 
   destroy() {
-    console.log("Intear Popup WalletAdapter destroyed.");
+    console.debug("Intear Popup WalletAdapter destroyed.");
   }
 }
 
