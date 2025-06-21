@@ -461,7 +461,6 @@ export const localTxHistory = () => {
 
 export const signOut = () => {
   update({ accountId: null, privateKey: null, contractId: null });
-  setConfig(NETWORKS[DEFAULT_NETWORK_ID]);
 };
 
 /**
