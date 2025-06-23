@@ -133,8 +133,6 @@ class LogoutWebSocket {
       this.ws = new WebSocket(`${wsUrl}/api/subscribe`);
 
       this.ws.onopen = async () => {
-        // Reset reconnect attempts on successful connection
-        this.reconnectAttempts = 0;
         if (!this.ws) {
           return;
         }
@@ -165,8 +163,10 @@ class LogoutWebSocket {
 
         if ("Success" in message) {
           this.logger.log("LogoutWebSocket:", message.Success.message);
+          this.reconnectAttempts = 0;
         } else if ("Error" in message) {
           this.logger.error("LogoutWebSocket error:", message.Error.message);
+          this.ws?.close();
         } else if ("LoggedOut" in message) {
           const { logout_info: logoutInfo } = message.LoggedOut;
           this.logger.log("LogoutWebSocket: Received logout notification:", logoutInfo);
