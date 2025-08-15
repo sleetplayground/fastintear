@@ -153,20 +153,30 @@ near.actions.createAccount();
 near.actions.deleteAccount({ beneficiaryId: "beneficiary.near" });
 
 // Contract deployment
-// The `deployContract` action itself requires the contract code as a Uint8Array.
-// The `near.actions.deployContract` helper simplifies this by accepting a base64 string.
+// The `deployContract` action requires the contract code as a byte array.
 
-// Example of getting the base64 string in Node.js:
-// const fs = require('fs');
-// const wasmBytes = fs.readFileSync('path/to/your.wasm');
-// const codeBase64 = Buffer.from(wasmBytes).toString('base64');
-
-// Example in browser:
+// Example of getting contract bytes in a browser from a WASM file:
 // const response = await fetch('path/to/your.wasm');
 // const wasmBytes = new Uint8Array(await response.arrayBuffer());
-// const codeBase64 = btoa(String.fromCharCode.apply(null, wasmBytes));
 
-near.actions.deployContract({ codeBase64: "..." /* your base64 string here */ });
+// Example of getting contract bytes from a comma-separated string (e.g., from a textarea):
+// const codeString = "0,97,115,109,...";
+// const codeBytes = new Uint8Array(codeString.split(',').map(s => parseInt(s.trim())));
+
+// To deploy a contract, you send a transaction with a `DeployContract` action.
+// The contract code should be passed as an array of numbers derived from a Uint8Array
+// to ensure correct serialization.
+near.sendTx({
+  receiverId: "your-account.near", // The account to deploy the contract to
+  actions: [
+    {
+      type: "DeployContract",
+      params: {
+        code: Array.from(wasmBytes) // or Array.from(codeBytes)
+      }
+    }
+  ]
+});
 ```
 
 ## INTEAR Wallet Integration
