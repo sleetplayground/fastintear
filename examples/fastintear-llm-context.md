@@ -137,16 +137,51 @@ near.actions.stake({
 });
 
 // Key management actions
-near.actions.addFullAccessKey({ publicKey: "ed25519:..." });
 
-near.actions.addLimitedAccessKey({
-  publicKey: "ed25519:...",
-  allowance: "1000000000000000000000000", // in yoctoNEAR
-  accountId: "contract.near",
-  methodNames: ["method_one", "method_two"]
+// To add a key, you need to send a transaction to your own account
+// with an `AddKey` action.
+
+// You'll need a new key pair first. The `@fastnear/utils` package,
+// which is exposed as `near.utils`, provides functions for this.
+// For example:
+// const newPrivateKey = near.utils.privateKeyFromRandom();
+// const newPublicKey = near.utils.publicKeyFromPrivate(newPrivateKey);
+
+// Add a full access key
+// This gives the new key full control over the account.
+await near.sendTx({
+  receiverId: near.accountId(),
+  actions: [
+    near.actions.addFullAccessKey({
+      publicKey: "ed25519:...", // The new public key
+    }),
+  ],
 });
 
-near.actions.deleteKey({ publicKey: "ed25519:..." });
+// Add a limited access (function call) key
+// This key can only call specific methods on a specific contract.
+await near.sendTx({
+  receiverId: near.accountId(),
+  actions: [
+    near.actions.addLimitedAccessKey({
+      publicKey: "ed25519:...", // The new public key
+      allowance: "1000000000000000000000000", // in yoctoNEAR
+      accountId: "contract.near", // The contract the key is allowed to call
+      methodNames: ["method_one", "method_two"], // Optional: specific methods
+    }),
+  ],
+});
+
+// Delete a key
+// This revokes the key's access.
+await near.sendTx({
+  receiverId: near.accountId(),
+  actions: [
+    near.actions.deleteKey({
+      publicKey: "ed25519:...", // The public key to delete
+    }),
+  ],
+});
 
 // Account management
 near.actions.createAccount();
