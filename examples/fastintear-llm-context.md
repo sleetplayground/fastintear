@@ -119,6 +119,7 @@ const account = await near.queryAccount({
 ### Action Helpers
 ```typescript
 // Function call action
+// Arguments can be passed as an object (`args`) or as a base64-encoded JSON string (`argsBase64`).
 near.actions.functionCall({
   methodName: "transfer",
   args: { receiver_id: "alice.near", amount: "1000" },
@@ -137,6 +138,14 @@ near.actions.stake({
 
 // Key management actions
 near.actions.addFullAccessKey({ publicKey: "ed25519:..." });
+
+near.actions.addLimitedAccessKey({
+  publicKey: "ed25519:...",
+  allowance: "1000000000000000000000000", // in yoctoNEAR
+  accountId: "contract.near",
+  methodNames: ["method_one", "method_two"]
+});
+
 near.actions.deleteKey({ publicKey: "ed25519:..." });
 
 // Account management
@@ -144,7 +153,20 @@ near.actions.createAccount();
 near.actions.deleteAccount({ beneficiaryId: "beneficiary.near" });
 
 // Contract deployment
-near.actions.deployContract({ codeBase64: "base64-encoded-wasm" });
+// The `deployContract` action itself requires the contract code as a Uint8Array.
+// The `near.actions.deployContract` helper simplifies this by accepting a base64 string.
+
+// Example of getting the base64 string in Node.js:
+// const fs = require('fs');
+// const wasmBytes = fs.readFileSync('path/to/your.wasm');
+// const codeBase64 = Buffer.from(wasmBytes).toString('base64');
+
+// Example in browser:
+// const response = await fetch('path/to/your.wasm');
+// const wasmBytes = new Uint8Array(await response.arrayBuffer());
+// const codeBase64 = btoa(String.fromCharCode.apply(null, wasmBytes));
+
+near.actions.deployContract({ codeBase64: "..." /* your base64 string here */ });
 ```
 
 ## INTEAR Wallet Integration
